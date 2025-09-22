@@ -10,85 +10,88 @@ from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, ConfusionMatrixDisplay
 import joblib
 
-st.title("Hybrid Stacking Model for Crowdfunding Prediction")
-uploaded_file = st.file_uploader("Upload CSV file", type="csv")
+st.title("Fast Hybrid Stacking Model for Crowdfunding Prediction")
+uploaded_file = st.file_uploader("Upload your dataset (CSV)", type="csv")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.write("### Data Preview", df.head())
+@st.cache_data
+def load_data(file):
+    df = pd.read_csv(file).fillna(0)
+    return df
 
-    target_col = st.selectbox("Pick your target column", df.columns)
-    df = df.fillna(0)
-    y = df[target_col].astype(int)
-    X = pd.get_dummies(df.drop(columns=[target_col]), drop_first=True)
-
-    stratify_param = y if y.nunique() > 1 and y.value_counts().min() > 1 else None
-    if stratify_param is None:
-        st.warning("Target has 1 class or too few samples. Stratification disabled.")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.1, stratify=stratify_param, random_state=42
-    )
-
+@st.cache_resource
+def train_model(X_train, y_train):
     base_models = [
-        ('lr', LogisticRegression(solver='liblinear')),
-        ('rf', RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)),
+        ('lr', LogisticRegression(solver='liblinear', max_iter=200)),
+        ('rf', RandomForestClassifier(n_estimators=100, random_state=42)),
         ('xgb', XGBClassifier(
-            n_estimators=50, max_depth=3, learning_rate=0.1,
-            subsample=0.8, colsample_bytree=0.8,
-            use_label_encoder=False, eval_metric='logloss', random_state=42
+            n_estimators=150, learning_rate=0.05, max_depth=4,
+            subsample=0.8, colsample_bytree=0.8, use_label_encoder=False,
+            eval_metric='logloss', random_state=42
         ))
     ]
-
     stack_model = StackingClassifier(
         estimators=base_models,
         final_estimator=LogisticRegression(solver='liblinear'),
-        cv=3,
+        cv=3,  # reduced CV for speed
         stack_method='predict_proba'
     )
+    stack_model.fit(X_train, y_train)
+    return stack_model
 
-    if st.button("Train Hybrid Model"):
-        with st.spinner("Training model, please wait..."):
-            stack_model.fit(X_train, y_train)
-            joblib.dump(stack_model, "hybrid_model.pkl")
+if uploaded_file is not None:
+    df = load_data(uploaded_file)
+    st.write("### Dataset Preview", df.head())
 
-            y_pred = stack_model.predict(X_test)
-            y_pred_proba = stack_model.predict_proba(X_test)[:, 1]
+    target_col = st.selectbox("Select Target Column (label)", df.columns)
+    y = df[target_col].astype(int)
+    X = pd.get_dummies(df.drop(columns=[target_col]), drop_first=True)
 
-            acc = accuracy_score(y_test, y_pred)
-            prec = precision_score(y_test, y_pred, zero_division=0)
-            rec = recall_score(y_test, y_pred, zero_division=0)
-            f1 = f1_score(y_test, y_pred, zero_division=0)
-            auc = roc_auc_score(y_test, y_pred_proba) if y.nunique() > 1 else 0.0
+    if y.nunique() > 1 and y.value_counts().min() > 1:
+        stratify_param = y
+    else:
+        stratify_param = None
+        st.warning("Target has only 1 class or too few samples. Stratification disabled.")
 
-            st.subheader("Metrics")
-            st.dataframe(pd.DataFrame({
-                "Accuracy":[acc*100],
-                "Precision":[prec*100],
-                "Recall":[rec*100],
-                "F1-score":[f1*100],
-                "ROC-AUC":[auc]
-            }).style.format("{:.2f}"))
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=stratify_param, random_state=42
+    )
 
-            st.subheader("Confusion Matrix")
-            cm = confusion_matrix(y_test, y_pred, labels=stack_model.classes_)
-            fig_cm, ax_cm = plt.subplots()
-            ConfusionMatrixDisplay(cm, display_labels=stack_model.classes_).plot(ax=ax_cm, cmap="Blues", colorbar=False)
-            st.pyplot(fig_cm)
+    stack_model = train_model(X_train, y_train)
+    joblib.dump(stack_model, "stack_model.pkl")  # save trained model
+    y_pred = stack_model.predict(X_test)
+    y_pred_proba = stack_model.predict_proba(X_test)[:, 1]
 
-            if y.nunique() > 1:
-                st.subheader("ROC Curve")
-                fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-                fig_roc, ax_roc = plt.subplots()
-                ax_roc.plot(fpr, tpr, label=f"AUC = {auc:.3f}")
-                ax_roc.plot([0,1],[0,1],"k--")
-                ax_roc.set_xlabel("False Positive Rate")
-                ax_roc.set_ylabel("True Positive Rate")
-                ax_roc.legend(loc="lower right")
-                st.pyplot(fig_roc)
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, zero_division=0)
+    rec = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    auc = roc_auc_score(y_test, y_pred_proba) if y.nunique() > 1 else 0.0
 
-            st.success("✅ Hybrid model trained and saved as 'hybrid_model.pkl'!")
+    st.subheader("Performance Metrics")
+    st.dataframe(pd.DataFrame({
+        "Accuracy":[acc*100], "Precision":[prec*100],
+        "Recall":[rec*100], "F1-score":[f1*100], "ROC-AUC":[auc]
+    }).style.format("{:.2f}"))
+
+    st.subheader("Confusion Matrix")
+    cm = confusion_matrix(y_test, y_pred, labels=stack_model.classes_)
+    fig_cm, ax_cm = plt.subplots()
+    ConfusionMatrixDisplay(cm, display_labels=stack_model.classes_).plot(ax=ax_cm, cmap="Blues", colorbar=False)
+    st.pyplot(fig_cm)
+
+    if y.nunique() > 1:
+        st.subheader("ROC Curve")
+        fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+        fig_roc, ax_roc = plt.subplots()
+        ax_roc.plot(fpr, tpr, label=f"Hybrid Stack (AUC = {auc:.3f})")
+        ax_roc.plot([0,1],[0,1],"k--")
+        ax_roc.set_xlabel("False Positive Rate")
+        ax_roc.set_ylabel("True Positive Rate")
+        ax_roc.legend(loc="lower right")
+        st.pyplot(fig_roc)
+
+    st.success("✅ Hybrid model trained and cached for speed!")
 
 else:
-    st.info("Upload a CSV to get started.")
+    st.info("👆 Upload a CSV file to begin.")
 
